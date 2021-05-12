@@ -139,6 +139,9 @@ typedef SOCKET sockettype;
 #include <dirent.h>
 #include <strings.h>
 typedef int sockettype;
+#ifndef INVALID_SOCKET
+#define INVALID_SOCKET (-1)
+#endif
 #define STDCALL_ON_WIN32
 #define THREAD_RETURN_TYPE void*
 #endif
@@ -1478,11 +1481,13 @@ static void connectionFree(struct Connection* connection) {
     free(connection);
 }
 
+#if !defined(WIN32)
 static void SIGPIPEHandler(int signal) {
     (void) signal;
     /* SIGPIPE happens any time we try to send() and the connection is closed. So we just ignore it and check the return code of send...*/
     ews_printf_debug("Ignoring SIGPIPE\n");
 }
+#endif
 
 void serverInit(struct Server* server) {
     if (server->initialized) {
@@ -1512,7 +1517,7 @@ void serverStop(struct Server* server) {
         return;
     }
     server->shouldRun = false;
-    if (server->listenerfd >= 0) {
+    if (server->listenerfd != INVALID_SOCKET) {
         close(server->listenerfd);
     }
     serverMutexUnlock(server);
@@ -1621,7 +1626,7 @@ static int acceptConnectionsUntilStoppedInternal(struct Server* server, const st
     while (server->shouldRun) {
         nextConnection->remoteAddrLength = sizeof(nextConnection->remoteAddr);
         nextConnection->socketfd = accept(server->listenerfd , (struct sockaddr*) &nextConnection->remoteAddr, &nextConnection->remoteAddrLength);
-        if (-1 == nextConnection->socketfd) {
+        if (INVALID_SOCKET == nextConnection->socketfd) {
             if (errno == EINTR) {
                 ews_printf("accept was interrupted, continuing if server.shouldRun is true...\n");
                 continue;
@@ -1915,7 +1920,7 @@ static THREAD_RETURN_TYPE STDCALL_ON_WIN32 connectionHandlerThread(void* connect
     pthread_cond_signal(&connection->server->connectionFinishedCond);
     pthread_mutex_unlock(&connection->server->connectionFinishedLock);
     connectionFree(connection);
-    return (THREAD_RETURN_TYPE) NULL;
+    return (THREAD_RETURN_TYPE) 0;
 }
 
 int serverMutexLock(struct Server* server) {
@@ -2191,7 +2196,7 @@ static DIR* opendir(const char* path) {
     wcscat(widePath, L"\\*");
     dirHandle->findFiles = FindFirstFileW(widePath, &dirHandle->findData);
     if (INVALID_HANDLE_VALUE == dirHandle->findFiles) {
-        ews_printf("Could not open path '%s' (wide path '%S'). GetLastError is %d\n", path, widePath, GetLastError());
+        ews_printf("Could not open path '%s' (wide path '%S'). GetLastError is %lu\n", path, widePath, GetLastError());
         free(widePath);
         free(dirHandle);
         return NULL;
@@ -2228,7 +2233,7 @@ static wchar_t* strdupWideFromUTF8(const char* utf8String, size_t extraBytes) {
     assert(utf8StringLength < INT_MAX && "No strings over 2GB please because MultiByteToWideChar does not allow that");
     int wideStringRequiredChars = MultiByteToWideChar(CP_UTF8, 0, utf8String, (int) utf8StringLength, NULL, 0);
     wchar_t* wideString = (wchar_t*)calloc(1, sizeof(wchar_t) * (wideStringRequiredChars + 1 + extraBytes));
-    int result = MultiByteToWideChar(CP_UTF8, 0, utf8String, utf8StringLength, wideString, wideStringRequiredChars + 1);
+    MultiByteToWideChar(CP_UTF8, 0, utf8String, utf8StringLength, wideString, wideStringRequiredChars + 1);
     return wideString; 
 }
 
@@ -2277,6 +2282,7 @@ static int strcasecmp(const char* str1, const char* str2) {
 }
 
 static int pthread_create(HANDLE* threadHandle, const void* attributes, LPTHREAD_START_ROUTINE threadRoutine, void* params) {
+    (void) attributes;
     *threadHandle = CreateThread(NULL, 0, threadRoutine, params, 0, NULL);
     if (INVALID_HANDLE_VALUE == *threadHandle) {
         ews_printf("Whoa! Failed to create a thread for routine %p\n", threadRoutine);
@@ -2286,6 +2292,7 @@ static int pthread_create(HANDLE* threadHandle, const void* attributes, LPTHREAD
 }
 
 static int pthread_cond_init(pthread_cond_t* cond, const void* attributes) {
+    (void) attributes;
     InitializeConditionVariable(cond);
     return 0;
 }
@@ -2303,10 +2310,12 @@ static int pthread_cond_signal(pthread_cond_t* cond) {
 }
 
 static int pthread_cond_destroy(pthread_cond_t* cond) {
+    (void) cond;
     return 0;
 }
 
 static int pthread_mutex_init(pthread_mutex_t* mutex, const void* attributes) {
+    (void) attributes;
     InitializeCriticalSection(mutex);
     return 0;
 }
@@ -2330,11 +2339,11 @@ static void callWSAStartupIfNecessary() {
     // nifty trick from http://stackoverflow.com/questions/1869689/is-it-possible-to-tell-if-wsastartup-has-been-called-in-a-process
     // try to create a socket, and if that fails because of uninitialized winsock, then initialize winsock
     SOCKET testsocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (SOCKET_ERROR == testsocket && WSANOTINITIALISED == WSAGetLastError()) {
+    if (INVALID_SOCKET == testsocket && WSANOTINITIALISED == WSAGetLastError()) {
         WSADATA data = { 0 };
         int result = WSAStartup(MAKEWORD(2, 2), &data);
         if (0 != result) {
-            ews_printf("Calling WSAStartup failed! It returned %d with GetLastError() = %d\n", result, GetLastError());
+            ews_printf("Calling WSAStartup failed! It returned %d with GetLastError() = %lu\n", result, GetLastError());
             abort();
         }
     } else {
